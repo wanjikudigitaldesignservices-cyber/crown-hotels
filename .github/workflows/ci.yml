@@ -1,0 +1,46 @@
+name: Crown Hotels CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, staging ]
+  pull_request:
+    branches: [ main, staging ]
+
+jobs:
+  test-and-verify:
+    name: Lint, Test, Security & Build Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: TypeScript Typecheck
+        run: npx tsc --noEmit
+
+      - name: Run Vitest Security & E2E Test Suite
+        run: npx vitest run
+
+      - name: Verify 100% Real Food Image Audit (<150KB, WebP, >=1200w)
+        run: npx tsx scripts/verify-images.ts
+
+      - name: Build Production Bundle
+        run: npm run build
+
+      - name: Verify Bundle Budget (<250 KB gzip JS)
+        run: |
+          JS_GZIP=$(gzip -c dist/assets/*.js | wc -c)
+          echo "Gzipped JS size: $JS_GZIP bytes"
+          if [ $JS_GZIP -gt 256000 ]; then
+            echo "Bundle exceeds 250 KB budget!"
+            exit 1
+          fi

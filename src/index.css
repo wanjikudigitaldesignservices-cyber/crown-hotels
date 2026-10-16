@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 42 47% 95%; /* #FAF6EC Ivory */
+    --foreground: 0 0% 11%;   /* #1C1C1C Charcoal */
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 11%;
+    --primary: 216 68% 14%;   /* #0B1F3A Deep Navy */
+    --primary-foreground: 42 47% 95%; /* #FAF6EC */
+    --secondary: 45 68% 47%; /* #C9A227 Crown Gold */
+    --secondary-foreground: 216 68% 14%;
+    --muted: 42 35% 89%;
+    --muted-foreground: 30 5% 40%;
+    --accent: 18 63% 44%;    /* #B4532A Savanna Terracotta */
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 42 20% 86%;
+    --input: 42 20% 86%;
+    --ring: 45 68% 47%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 216 68% 7%;  /* #071527 Ultra Deep Navy */
+    --foreground: 42 47% 95%;  /* #FAF6EC */
+    --card: 216 59% 11%;      /* #0B1F3A */
+    --card-foreground: 42 47% 95%;
+    --popover: 216 59% 11%;
+    --popover-foreground: 42 47% 95%;
+    --primary: 45 68% 47%;    /* Gold becomes primary in dark mode */
+    --primary-foreground: 216 68% 14%;
+    --secondary: 216 45% 20%;
+    --secondary-foreground: 42 47% 95%;
+    --muted: 216 35% 18%;
+    --muted-foreground: 42 20% 70%;
+    --accent: 18 63% 48%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 216 35% 22%;
+    --input: 216 35% 22%;
+    --ring: 45 68% 47%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased selection:bg-crown-gold/30 selection:text-crown-navy;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+/* Custom Smooth Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #C9A227;
+  border-radius: 9999px;
+  opacity: 0.6;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9E7B15;
+}
+
+/* Print styling for Table Tents */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+}

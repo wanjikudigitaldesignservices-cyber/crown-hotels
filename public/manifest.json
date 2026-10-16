@@ -1,0 +1,18 @@
+{
+  "name": "Crown Hotels Digital Guest Menu",
+  "short_name": "Crown Menu",
+  "description": "Order authentic Kenyan dining, continental grill, and beverages directly to your table, room, or poolside at Crown Hotels.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF6EC",
+  "theme_color": "#0B1F3A",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/brand/crown-monogram.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
