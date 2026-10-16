@@ -31,3 +31,5 @@ Thumbs.db
 # Cache
 .cache/
 .eslintcache
+
+.vercel

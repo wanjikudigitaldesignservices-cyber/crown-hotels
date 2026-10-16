@@ -220,7 +220,7 @@ export interface Order {
 export interface Payment {
   id: string;
   order_id: string;
-  provider: 'intasend';
+  provider: 'intasend' | 'daraja' | 'mpesa';
   intasend_invoice_id?: string | null;
   intasend_tracking_id?: string | null;
   mpesa_receipt_number?: string | null;

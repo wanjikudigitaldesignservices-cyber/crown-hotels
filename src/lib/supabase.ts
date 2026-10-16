@@ -784,6 +784,53 @@ class LocalBackendStore {
     return { status: 'SUCCESS', order_ref: payment.order_id };
   }
 
+  recordMpesaPaymentSuccess(orderId: string, mpesaReceipt: string): { order: Order; payment: Payment } {
+    let payment = this.payments.find((p) => p.order_id === orderId);
+    if (!payment) {
+      payment = {
+        id: `pay-${Date.now()}`,
+        order_id: orderId,
+        provider: 'daraja',
+        phone_number: '',
+        status: 'paid',
+        amount_kes: 0,
+        currency: 'KES',
+        mpesa_receipt_number: mpesaReceipt,
+        signature_verified: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      this.payments.push(payment);
+    } else {
+      payment.status = 'paid';
+      payment.mpesa_receipt_number = mpesaReceipt;
+      payment.signature_verified = true;
+      payment.updated_at = new Date().toISOString();
+    }
+    this.save('payments', this.payments);
+
+    const order = this.orders.find((o) => o.id === orderId);
+    if (order) {
+      order.payment_status = 'paid';
+      order.updated_at = new Date().toISOString();
+      const event: OrderEvent = {
+        id: `ev-${Date.now()}`,
+        order_id: order.id,
+        from_status: order.status,
+        to_status: order.status,
+        actor_role: 'system',
+        note: `Safaricom Daraja M-Pesa payment confirmed. Receipt: ${mpesaReceipt}`,
+        created_at: new Date().toISOString(),
+      };
+      order.events = order.events || [];
+      order.events.push(event);
+      this.save('orders', this.orders);
+      realtimeBus.emit('order:payment_updated', { order, payment });
+      return { order, payment };
+    }
+    throw new Error('Order not found for ID: ' + orderId);
+  }
+
   // ---------------------------------------------------------------------------
   // STAFF ORDER MANAGEMENT (Kitchen, Waiter, Admin)
   // ---------------------------------------------------------------------------

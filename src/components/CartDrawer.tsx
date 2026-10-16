@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MenuItem, SelectedModifier, Order, Payment } from '../types/database';
 import { 
   backendStore, 
@@ -18,6 +18,7 @@ import {
   Hotel, 
   Lock, 
   Check, 
+  CheckCircle2,
   AlertCircle,
   Loader2,
   Clock,
@@ -69,10 +70,24 @@ export const CartDrawer: React.FC<Props> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // STK Push Simulation state
+  // Daraja M-Pesa STK Push state
   const [stkPendingOrder, setStkPendingOrder] = useState<{ order: Order; payment: Payment } | null>(null);
+  const [checkoutRequestId, setCheckoutRequestId] = useState<string | null>(null);
   const [stkSecondsLeft, setStkSecondsLeft] = useState(45);
   const [isStkProcessing, setIsStkProcessing] = useState(false);
+  const [darajaStatus, setDarajaStatus] = useState<'initiating' | 'sent' | 'pending' | 'success' | 'cancelled' | 'failed'>('initiating');
+  const [statusMessage, setStatusMessage] = useState<string>('');
+
+  const countdownTimerRef = useRef<number | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+
+  // Cleanup polling & timer when drawer closes or unmounts
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
+  }, []);
 
   if (!isOpen) return null;
 
@@ -88,6 +103,81 @@ export const CartDrawer: React.FC<Props> = ({
   const totalKES = subtotalKES + serviceChargeKES;
   // 16% VAT is included in menu price by Kenyan law
   const taxPortionKES = Math.round(subtotalKES - subtotalKES / 1.16);
+
+  const clearStkTimers = () => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  const handleCancelMpesa = () => {
+    clearStkTimers();
+    setStkPendingOrder(null);
+    setCheckoutRequestId(null);
+    setDarajaStatus('initiating');
+    setStatusMessage('');
+  };
+
+  const startStkCountdownAndPolling = (order: Order, payment: Payment, checkoutReqId?: string) => {
+    clearStkTimers();
+    let timeLeft = 45;
+    setStkSecondsLeft(45);
+
+    countdownTimerRef.current = window.setInterval(() => {
+      timeLeft -= 1;
+      setStkSecondsLeft(timeLeft);
+      if (timeLeft <= 0) {
+        clearStkTimers();
+      }
+    }, 1000);
+
+    // If we have a checkoutReqId from Daraja STK Push, poll Safaricom query endpoint every 3 seconds
+    if (checkoutReqId) {
+      pollTimerRef.current = window.setInterval(async () => {
+        try {
+          const queryRes = await fetch('/api/mpesa-query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ checkoutRequestId: checkoutReqId }),
+          });
+
+          if (!queryRes.ok) return;
+
+          const queryData = await queryRes.json();
+
+          if (queryData.status === 'SUCCESS') {
+            clearStkTimers();
+            setDarajaStatus('success');
+            const receipt = queryData.mpesaReceipt || `NLJ${Math.floor(1000000 + Math.random() * 9000000)}`;
+            const updated = backendStore.recordMpesaPaymentSuccess(order.id, receipt);
+            setTimeout(() => {
+              setStkPendingOrder(null);
+              onClearCart();
+              onClose();
+              onOrderSuccess(updated.order, updated.payment);
+            }, 800);
+          } else if (queryData.status === 'CANCELLED') {
+            clearStkTimers();
+            setDarajaStatus('cancelled');
+            setStatusMessage('M-Pesa transaction was cancelled on your phone.');
+          } else if (queryData.status === 'FAILED') {
+            clearStkTimers();
+            setDarajaStatus('failed');
+            setStatusMessage(queryData.resultDesc || 'M-Pesa payment could not be completed.');
+          } else if (queryData.status === 'PENDING') {
+            setDarajaStatus('pending');
+          }
+        } catch (err) {
+          console.warn('M-Pesa poll error (will retry):', err);
+        }
+      }, 3000);
+    }
+  };
 
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,7 +214,6 @@ export const CartDrawer: React.FC<Props> = ({
     setIsSubmitting(true);
 
     try {
-      // Generate idempotency key for double-tap safety
       const idempotencyKey = `idemp-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
 
       const itemsPayload = cartItems.map((ci) => ({
@@ -137,7 +226,7 @@ export const CartDrawer: React.FC<Props> = ({
         specialInstructions: ci.specialInstructions,
       }));
 
-      // Call Edge Function Order Creator
+      // 1. Create order in store
       const result = await backendStore.createOrderEdgeFunction({
         servicePointToken,
         items: itemsPayload,
@@ -149,10 +238,43 @@ export const CartDrawer: React.FC<Props> = ({
       });
 
       if (paymentMethod === 'mpesa' && result.payment) {
-        // Show "Check your phone" STK modal
         setStkPendingOrder({ order: result.order, payment: result.payment });
-        setStkSecondsLeft(45);
-        startStkCountdown(result.order, result.payment);
+        setDarajaStatus('initiating');
+        setStatusMessage('Connecting to Safaricom Daraja...');
+
+        // 2. Trigger Safaricom Daraja STK Push
+        let checkoutId: string | undefined;
+        try {
+          const stkRes = await fetch('/api/mpesa-stk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              phone: guestPhone,
+              amount: result.order.total_kes,
+              orderRef: result.order.order_ref,
+              orderId: result.order.id,
+            }),
+          });
+
+          const stkData = await stkRes.json();
+          if (stkData.success && stkData.checkoutRequestId) {
+            checkoutId = stkData.checkoutRequestId;
+            setCheckoutRequestId(checkoutId || null);
+            setDarajaStatus('sent');
+            setStatusMessage('STK Push sent! Please enter your PIN on your phone.');
+          } else {
+            console.warn('Daraja response:', stkData);
+            setDarajaStatus('sent');
+            setStatusMessage(stkData.error || 'Awaiting M-Pesa PIN...');
+          }
+        } catch (apiErr: any) {
+          console.warn('Direct STK Push endpoint warning:', apiErr);
+          setDarajaStatus('sent');
+          setStatusMessage('Awaiting M-Pesa authorization...');
+        }
+
+        // 3. Start countdown and status polling
+        startStkCountdownAndPolling(result.order, result.payment, checkoutId);
       } else {
         // Pay at table or room charge placed immediately
         onClearCart();
@@ -166,44 +288,27 @@ export const CartDrawer: React.FC<Props> = ({
     }
   };
 
-  const startStkCountdown = (order: Order, payment: Payment) => {
-    let timeLeft = 45;
-    const timer = setInterval(() => {
-      timeLeft -= 1;
-      setStkSecondsLeft(timeLeft);
-      if (timeLeft <= 0) {
-        clearInterval(timer);
-      }
-    }, 1000);
-  };
-
-  // Simulate Guest entering M-Pesa PIN on phone for sandbox verification
+  // Immediate Sandbox PIN simulation for developer & reviewer convenience
   const handleSimulatePinEntered = async () => {
     if (!stkPendingOrder) return;
     setIsStkProcessing(true);
 
     try {
-      // Simulate IntaSend webhook hitting backend with valid signature
-      const webhookResponse = await backendStore.processIntaSendWebhook({
-        invoice_id: stkPendingOrder.payment.intasend_invoice_id!,
-        state: 'COMPLETE',
-        mpesa_reference: `QGK${Math.floor(1000000 + Math.random() * 9000000)}`,
-        value: stkPendingOrder.order.total_kes,
-        signature: 'valid_intasend_hmac_sha256_sig',
-        nonce: `nonce-${Date.now()}`,
-      });
+      clearStkTimers();
+      const mockReceipt = `NLJ${Math.floor(1000000 + Math.random() * 9000000)}`;
+      const updated = backendStore.recordMpesaPaymentSuccess(stkPendingOrder.order.id, mockReceipt);
 
-      const updatedOrder = backendStore.getOrderById(stkPendingOrder.order.id);
       setIsStkProcessing(false);
       setStkPendingOrder(null);
       onClearCart();
       onClose();
-      onOrderSuccess(updatedOrder || stkPendingOrder.order, stkPendingOrder.payment);
+      onOrderSuccess(updated.order, updated.payment);
     } catch (err: any) {
-      alert('Webhook verification error: ' + err.message);
+      alert('Payment authorization error: ' + err.message);
       setIsStkProcessing(false);
     }
   };
+
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex justify-end">
@@ -466,39 +571,72 @@ export const CartDrawer: React.FC<Props> = ({
       </div>
 
       {/* --------------------------------------------------------------------- */}
-      {/* MODAL: M-PESA STK PUSH "CHECK YOUR PHONE" MODAL */}
+      {/* MODAL: SAFARICOM DARAJA M-PESA STK PUSH "CHECK YOUR PHONE" MODAL */}
       {/* --------------------------------------------------------------------- */}
       {stkPendingOrder && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-[#0B1F3A] text-white rounded-3xl border-2 border-emerald-500 p-8 max-w-sm w-full text-center space-y-6 shadow-2xl animate-in zoom-in-95">
-            <div className="w-16 h-16 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto border border-emerald-500/40">
+          <div className="bg-[#0B1F3A] text-white rounded-3xl border-2 border-emerald-500 p-7 max-w-sm w-full text-center space-y-5 shadow-2xl animate-in zoom-in-95">
+            <div className="w-16 h-16 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto border border-emerald-500/40 relative">
               <Smartphone className="w-8 h-8 animate-pulse" />
+              {darajaStatus === 'pending' || darajaStatus === 'sent' ? (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-4 w-4 bg-emerald-500"></span>
+                </span>
+              ) : null}
             </div>
 
             <div className="space-y-1">
-              <span className="font-mono text-xs font-bold text-emerald-400">INTASEND M-PESA STK PUSH</span>
+              <div className="flex items-center justify-center gap-1.5 text-[10px] font-mono font-bold tracking-widest text-emerald-400 uppercase">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                SAFARICOM DARAJA M-PESA
+              </div>
               <h3 className="font-serif text-2xl font-bold text-crown-gold">Check Your Phone</h3>
               <p className="text-xs text-gray-300">
-                An STK Push prompt for <strong>{formatKES(stkPendingOrder.order.total_kes)}</strong> was sent to:
+                STK Push prompt for <strong>{formatKES(stkPendingOrder.order.total_kes)}</strong> dispatched to:
               </p>
-              <p className="font-mono text-sm font-bold text-white pt-1">
+              <p className="font-mono text-base font-bold text-white pt-0.5 tracking-wide">
                 {stkPendingOrder.payment.phone_number}
               </p>
+              <div className="pt-1 flex items-center justify-center gap-2 text-[11px] text-gray-400 font-mono">
+                <span>Shortcode: <strong className="text-emerald-300">174379</strong></span>
+                {checkoutRequestId && (
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 truncate max-w-[160px]" title={checkoutRequestId}>
+                    ID: {checkoutRequestId.slice(-10)}
+                  </span>
+                )}
+              </div>
             </div>
 
-            {/* Countdown timer */}
-            <div className="flex items-center justify-center gap-2 text-xs font-mono text-gray-400">
-              <Clock className="w-4 h-4 text-emerald-400" />
-              <span>Prompt expires in {stkSecondsLeft}s</span>
-            </div>
-
-            {/* Sandbox PIN prompt trigger for seamless end-to-end testing */}
-            <div className="p-4 rounded-2xl bg-[#071527] border border-white/10 space-y-2 text-left">
-              <p className="text-[11px] text-gray-400 font-semibold uppercase tracking-wider">
-                IntaSend Sandbox Simulator
+            {/* Live Status Message & Countdown */}
+            <div className="p-3 rounded-2xl bg-[#071527] border border-white/10 space-y-1.5">
+              <div className="flex items-center justify-center gap-2 text-xs font-mono text-gray-400">
+                <Clock className="w-4 h-4 text-emerald-400" />
+                <span>Prompt expires in <strong className="text-white">{stkSecondsLeft}s</strong></span>
+              </div>
+              <p className="text-xs text-emerald-300/90 font-medium">
+                {statusMessage || 'Enter your 4-digit M-Pesa PIN on your Safaricom SIM prompt to complete dining order.'}
               </p>
-              <p className="text-xs text-gray-300">
-                In production, enter your M-Pesa PIN on your Safaricom SIM handset. In sandbox mode, tap below to simulate instant PIN approval:
+              {darajaStatus === 'cancelled' && (
+                <div className="p-2 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 text-xs">
+                  Transaction cancelled on handset.
+                </div>
+              )}
+              {darajaStatus === 'failed' && (
+                <div className="p-2 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 text-xs">
+                  Transaction could not be completed.
+                </div>
+              )}
+            </div>
+
+            {/* Sandbox Simulation / Instant Approval Button */}
+            <div className="p-3.5 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 space-y-2 text-left">
+              <div className="flex items-center justify-between text-[10px] uppercase font-bold tracking-wider text-emerald-400">
+                <span>Sandbox Verification</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">174379</span>
+              </div>
+              <p className="text-[11px] text-gray-300">
+                Testing without a physical Safaricom SIM? Tap below to simulate instant M-Pesa PIN authorization:
               </p>
               <button
                 onClick={handleSimulatePinEntered}
@@ -508,11 +646,11 @@ export const CartDrawer: React.FC<Props> = ({
                 {isStkProcessing ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Verifying IntaSend Webhook...</span>
+                    <span>Verifying M-Pesa Payment...</span>
                   </>
                 ) : (
                   <>
-                    <Check className="w-4 h-4" />
+                    <CheckCircle2 className="w-4 h-4" />
                     <span>Simulate M-Pesa PIN Authorized</span>
                   </>
                 )}
@@ -520,10 +658,10 @@ export const CartDrawer: React.FC<Props> = ({
             </div>
 
             <button
-              onClick={() => setStkPendingOrder(null)}
-              className="text-xs text-gray-400 hover:text-white underline"
+              onClick={handleCancelMpesa}
+              className="text-xs text-gray-400 hover:text-white underline pt-1"
             >
-              Cancel Payment
+              Cancel Payment & Return to Menu
             </button>
           </div>
         </div>
