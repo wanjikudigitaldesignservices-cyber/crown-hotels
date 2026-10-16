@@ -3,8 +3,14 @@ import {
   backendStore, 
   realtimeBus, 
   formatKES, 
-  formatUSD 
+  formatUSD,
+  getSavedSupabaseConfig,
+  isSupabaseLiveConfigured,
+  verifySupabaseConnection,
+  clearSavedSupabaseConfig,
+  testSupabaseDatabaseQuery
 } from '../lib/supabase';
+
 import { 
   MenuItem, 
   MenuCategory, 
@@ -44,7 +50,11 @@ import {
   ChevronRight,
   RefreshCw,
   ChefHat,
-  BellRing
+  BellRing,
+  Database,
+  Server,
+  CheckCircle2,
+  ExternalLink
 } from 'lucide-react';
 import QRCode from 'qrcode';
 
@@ -82,6 +92,18 @@ export const AdminDashboard: React.FC = () => {
   const [showBulkPriceModal, setShowBulkPriceModal] = useState(false);
   const [selectedTableTent, setSelectedTableTent] = useState<{ sp: ServicePoint; qrDataUrl: string } | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+
+  // Supabase Live Cloud state
+  const savedSupabase = getSavedSupabaseConfig();
+  const [supabaseUrl, setSupabaseUrl] = useState(savedSupabase.url);
+  const [supabaseKey, setSupabaseKey] = useState(savedSupabase.key);
+  const [isLiveConnected, setIsLiveConnected] = useState(isSupabaseLiveConfigured());
+  const [isVerifyingSupabase, setIsVerifyingSupabase] = useState(false);
+  const [isQueryingDb, setIsQueryingDb] = useState(false);
+  const [supabaseVerifyResult, setSupabaseVerifyResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [dbQueryResult, setDbQueryResult] = useState<{ success: boolean; message: string; tableCounts?: { categories: number; items: number; servicePoints: number } } | null>(null);
+  const [showSqlGuide, setShowSqlGuide] = useState(false);
+  const [copiedMigrationSql, setCopiedMigrationSql] = useState(false);
 
   // Form State for Menu Item create/edit
   const [itemForm, setItemForm] = useState<{
@@ -135,6 +157,76 @@ export const AdminDashboard: React.FC = () => {
         // RLS blocked
       }
     }
+  };
+
+  const handleVerifySupabase = async () => {
+    if (!supabaseUrl.trim() || !supabaseKey.trim()) {
+      setSupabaseVerifyResult({
+        success: false,
+        message: 'Please provide both the Supabase Project URL and Anon API Key.',
+      });
+      return;
+    }
+
+    setIsVerifyingSupabase(true);
+    setSupabaseVerifyResult(null);
+    setDbQueryResult(null);
+
+    try {
+      const res = await verifySupabaseConnection(supabaseUrl, supabaseKey);
+      setSupabaseVerifyResult(res);
+      if (res.success) {
+        setIsLiveConnected(true);
+        notify('Connected to live Supabase project!');
+        // Automatically test table queries
+        const queryRes = await testSupabaseDatabaseQuery();
+        setDbQueryResult(queryRes);
+      }
+    } catch (err: any) {
+      setSupabaseVerifyResult({
+        success: false,
+        message: err.message || 'Unknown network error when connecting to Supabase.',
+      });
+    } finally {
+      setIsVerifyingSupabase(false);
+    }
+  };
+
+  const handleTestDatabaseQuery = async () => {
+    setIsQueryingDb(true);
+    setDbQueryResult(null);
+    try {
+      const res = await testSupabaseDatabaseQuery();
+      setDbQueryResult(res);
+      if (res.success) {
+        notify('Live PostgreSQL tables verified!');
+      }
+    } catch (err: any) {
+      setDbQueryResult({
+        success: false,
+        message: err.message || 'Database query error.',
+      });
+    } finally {
+      setIsQueryingDb(false);
+    }
+  };
+
+  const handleDisconnectSupabase = () => {
+    if (!confirm('Revert to local demo database? Cloud credentials will be cleared from this browser session.')) return;
+    clearSavedSupabaseConfig();
+    setIsLiveConnected(false);
+    setSupabaseUrl('');
+    setSupabaseKey('');
+    setSupabaseVerifyResult(null);
+    setDbQueryResult(null);
+    notify('Reverted to high-performance local store (demo mode).');
+  };
+
+  const handleCopySqlInstructions = () => {
+    navigator.clipboard.writeText('supabase/migrations/20261016_001_initial_schema.sql');
+    setCopiedMigrationSql(true);
+    setTimeout(() => setCopiedMigrationSql(false), 2500);
+    notify('Copied migration file path to clipboard');
   };
 
   useEffect(() => {
@@ -561,6 +653,30 @@ export const AdminDashboard: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Live Database Status Indicator */}
+            {isLiveConnected ? (
+              <button
+                onClick={() => setActiveTab('settings')}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-semibold transition"
+                title="Click to view Database settings"
+              >
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <Database className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Supabase Live Active</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setActiveTab('settings')}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-400 border border-amber-500/30 text-xs font-semibold transition"
+                title="Click to configure live Supabase cloud database"
+              >
+                <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                <Database className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Local Demo Store</span>
+                <span className="text-[10px] underline ml-0.5 font-bold">Connect DB</span>
+              </button>
+            )}
+
             <div className="hidden sm:block text-right">
               <p className="text-xs font-semibold text-crown-navy dark:text-crown-ivory">{currentUser.full_name}</p>
               <p className="text-[11px] text-gray-400">{currentUser.email}</p>
@@ -1197,54 +1313,319 @@ export const AdminDashboard: React.FC = () => {
         {/* TAB 6: PROPERTY SETTINGS */}
         {/* ------------------------------------------------------------------- */}
         {activeTab === 'settings' && (
-          <div className="max-w-2xl bg-white dark:bg-[#0B1F3A]/60 p-6 rounded-2xl border border-[#C9A227]/20 shadow-sm space-y-6">
-            <div>
-              <h3 className="font-serif text-xl font-bold text-crown-navy dark:text-crown-gold">Hotel &amp; Dining Settings</h3>
-              <p className="text-xs text-gray-500 mt-1">Configurable rates, service charge, and data retention policies.</p>
+          <div className="max-w-4xl space-y-8">
+            {/* --------------------------------------------------------------- */}
+            {/* 1. SUPABASE CLOUD DATABASE & REALTIME SYNC */}
+            {/* --------------------------------------------------------------- */}
+            <div className="bg-white dark:bg-[#0B1F3A]/80 p-6 sm:p-8 rounded-2xl border border-[#C9A227]/30 shadow-xl space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#C9A227]/20 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-xl bg-crown-gold/15 text-crown-gold border border-crown-gold/30">
+                    <Database className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="font-serif text-xl font-bold text-crown-navy dark:text-crown-gold flex items-center gap-2">
+                      <span>Supabase Cloud Database &amp; Realtime Sync</span>
+                    </h3>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                      Production PostgreSQL database with row-level security and real-time WebSocket replication.
+                    </p>
+                  </div>
+                </div>
+
+                <div>
+                  {isLiveConnected ? (
+                    <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-700 dark:text-emerald-400 text-xs font-bold">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                      <span>Live Cloud Connected</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs font-bold">
+                      <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                      <span>Local In-Memory Mode (Demo)</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Status Banner when test or verification is triggered */}
+              {supabaseVerifyResult && (
+                <div
+                  className={`p-4 rounded-xl text-xs flex items-start gap-3 border ${
+                    supabaseVerifyResult.success
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-300'
+                      : 'bg-red-500/10 border-red-500/30 text-red-800 dark:text-red-300'
+                  }`}
+                >
+                  {supabaseVerifyResult.success ? (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-500 flex-shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                  )}
+                  <div className="space-y-1">
+                    <p className="font-bold">
+                      {supabaseVerifyResult.success ? 'Supabase Connection Verified' : 'Connection Failed'}
+                    </p>
+                    <p className="opacity-90">{supabaseVerifyResult.message}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Table Count Inspection Banner */}
+              {dbQueryResult && (
+                <div
+                  className={`p-4 rounded-xl text-xs flex items-start gap-3 border ${
+                    dbQueryResult.success
+                      ? 'bg-[#0B1F3A]/40 border-crown-gold/40 text-crown-navy dark:text-crown-ivory'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-800 dark:text-amber-300'
+                  }`}
+                >
+                  <Server className="w-5 h-5 text-crown-gold flex-shrink-0 mt-0.5" />
+                  <div className="space-y-1 w-full">
+                    <p className="font-bold text-crown-gold">PostgreSQL Table Diagnostics</p>
+                    <p className="opacity-90">{dbQueryResult.message}</p>
+                    {dbQueryResult.tableCounts && (
+                      <div className="grid grid-cols-3 gap-2 pt-2 text-[11px] font-mono">
+                        <div className="p-2 rounded-lg bg-black/10 dark:bg-black/30 text-center">
+                          <span className="text-gray-400 block text-[9px] uppercase">Categories</span>
+                          <span className="text-sm font-bold text-crown-gold">{dbQueryResult.tableCounts.categories}</span>
+                        </div>
+                        <div className="p-2 rounded-lg bg-black/10 dark:bg-black/30 text-center">
+                          <span className="text-gray-400 block text-[9px] uppercase">Menu Items</span>
+                          <span className="text-sm font-bold text-crown-gold">{dbQueryResult.tableCounts.items}</span>
+                        </div>
+                        <div className="p-2 rounded-lg bg-black/10 dark:bg-black/30 text-center">
+                          <span className="text-gray-400 block text-[9px] uppercase">Service Points</span>
+                          <span className="text-sm font-bold text-crown-gold">{dbQueryResult.tableCounts.servicePoints}</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Configuration Inputs */}
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="block font-bold mb-1 text-crown-navy dark:text-crown-ivory">
+                    Supabase Project URL
+                  </label>
+                  <input
+                    type="url"
+                    value={supabaseUrl}
+                    onChange={(e) => setSupabaseUrl(e.target.value)}
+                    placeholder="https://your-project-ref.supabase.co"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-sm font-mono focus:outline-none focus:border-crown-gold"
+                  />
+                  <span className="text-[11px] text-gray-400 mt-1 block">
+                    From your Supabase Project Settings → API → Project URL.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block font-bold mb-1 text-crown-navy dark:text-crown-ivory">
+                    Supabase Anon / Public API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={supabaseKey}
+                    onChange={(e) => setSupabaseKey(e.target.value)}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-sm font-mono focus:outline-none focus:border-crown-gold"
+                  />
+                  <span className="text-[11px] text-gray-400 mt-1 block">
+                    From your Supabase Project Settings → API → Project API Keys (<code className="font-mono text-crown-gold">anon public</code>).
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-2">
+                  <button
+                    onClick={handleVerifySupabase}
+                    disabled={isVerifyingSupabase}
+                    className="px-5 py-2.5 rounded-xl bg-crown-navy dark:bg-crown-gold text-crown-ivory dark:text-crown-navy font-bold text-xs hover:opacity-90 transition shadow-md flex items-center gap-2 disabled:opacity-50"
+                  >
+                    {isVerifyingSupabase ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>Verifying Connection...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Database className="w-4 h-4" />
+                        <span>Test &amp; Connect Live Supabase</span>
+                      </>
+                    )}
+                  </button>
+
+                  {isLiveConnected && (
+                    <button
+                      onClick={handleTestDatabaseQuery}
+                      disabled={isQueryingDb}
+                      className="px-4 py-2.5 rounded-xl border border-crown-gold/40 text-crown-gold font-bold text-xs hover:bg-crown-gold/10 transition flex items-center gap-2 disabled:opacity-50"
+                    >
+                      {isQueryingDb ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Checking Tables...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Server className="w-3.5 h-3.5" />
+                          <span>Verify PostgreSQL Tables</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  {isLiveConnected && (
+                    <button
+                      onClick={handleDisconnectSupabase}
+                      className="px-4 py-2.5 rounded-xl border border-red-500/40 text-red-600 dark:text-red-400 font-semibold text-xs hover:bg-red-500/10 transition"
+                    >
+                      Disconnect &amp; Use Demo Store
+                    </button>
+                  )}
+
+                  <a
+                    href="https://supabase.com/dashboard"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-auto text-xs font-semibold text-gray-500 dark:text-gray-400 hover:text-crown-gold flex items-center gap-1.5 transition"
+                  >
+                    <span>Supabase Dashboard</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+
+              {/* PostgreSQL Migration Guide Dropdown */}
+              <div className="border-t border-[#C9A227]/20 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowSqlGuide(!showSqlGuide)}
+                  className="w-full flex items-center justify-between text-left text-xs font-bold text-crown-navy dark:text-crown-gold hover:opacity-80 py-1"
+                >
+                  <span className="flex items-center gap-2">
+                    <Server className="w-4 h-4 text-crown-gold" />
+                    <span>Database Migrations &amp; Schema Setup Instructions</span>
+                  </span>
+                  <span>{showSqlGuide ? '▲ Hide' : '▼ View Details'}</span>
+                </button>
+
+                {showSqlGuide && (
+                  <div className="mt-3 p-4 rounded-xl bg-stone-100 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-xs space-y-3">
+                    <p className="text-gray-600 dark:text-gray-300">
+                      To deploy Crown Hotels Kenya to a fresh Supabase project, execute the SQL migration scripts in your Supabase SQL Editor:
+                    </p>
+                    <ol className="list-decimal list-inside space-y-1.5 text-gray-500 dark:text-gray-400 font-mono text-[11px]">
+                      <li>
+                        <strong className="text-crown-navy dark:text-crown-ivory">Schema &amp; Policies:</strong>{' '}
+                        <code>supabase/migrations/20261016_001_initial_schema.sql</code>
+                      </li>
+                      <li>
+                        <strong className="text-crown-navy dark:text-crown-ivory">Crown Plaza Nairobi 5-Star Seed Data:</strong>{' '}
+                        <code>supabase/migrations/20261016_002_seed_data.sql</code>
+                      </li>
+                    </ol>
+
+                    <div className="flex items-center gap-2 pt-2">
+                      <button
+                        onClick={handleCopySqlInstructions}
+                        className="px-3 py-1.5 rounded-lg bg-crown-gold/20 hover:bg-crown-gold/30 text-crown-gold font-bold text-[11px] flex items-center gap-1.5 transition"
+                      >
+                        {copiedMigrationSql ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Path Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Schema Path</span>
+                          </>
+                        )}
+                      </button>
+                      <span className="text-[11px] text-gray-400">
+                        Zero-trust Row Level Security (RLS) &amp; Realtime publication included.
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div className="space-y-4 text-xs">
-              <div>
-                <label className="block font-semibold mb-1">USD Conversion Rate (KES per 1 USD)</label>
-                <input
-                  type="number"
-                  value={settings.usd_exchange_rate}
-                  onChange={(e) => setSettings({ ...settings, usd_exchange_rate: Number(e.target.value) })}
-                  className="w-full px-3 py-2 rounded-xl bg-stone-50 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-sm focus:outline-none focus:border-crown-gold"
-                />
+            {/* --------------------------------------------------------------- */}
+            {/* 2. PROPERTY SETTINGS & OPERATIONAL POLICIES */}
+            {/* --------------------------------------------------------------- */}
+            <div className="bg-white dark:bg-[#0B1F3A]/80 p-6 sm:p-8 rounded-2xl border border-[#C9A227]/30 shadow-xl space-y-6">
+              <div className="border-b border-[#C9A227]/20 pb-4">
+                <h3 className="font-serif text-xl font-bold text-crown-navy dark:text-crown-gold flex items-center gap-2">
+                  <SettingsIcon className="w-5 h-5 text-crown-gold" />
+                  <span>Hotel &amp; Dining Operational Settings</span>
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  Dynamic currency rates, statutory service charge, and Kenya Data Protection Act compliance.
+                </p>
               </div>
 
-              <div>
-                <label className="block font-semibold mb-1">Service Charge Percentage (%)</label>
-                <input
-                  type="number"
-                  value={backendStore.getProperty().service_charge_pct}
-                  readOnly
-                  className="w-full px-3 py-2 rounded-xl bg-stone-100 dark:bg-stone-900 border border-stone-200 dark:border-stone-800 text-sm opacity-70"
-                />
-                <span className="text-[11px] text-gray-400">Fixed at 5.0% by Crown Group hospitality guidelines</span>
-              </div>
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="block font-semibold mb-1 text-crown-navy dark:text-crown-ivory">
+                    USD Conversion Rate (KES per 1 USD)
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.usd_exchange_rate}
+                    onChange={(e) => setSettings({ ...settings, usd_exchange_rate: Number(e.target.value) })}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-sm font-semibold focus:outline-none focus:border-crown-gold"
+                  />
+                  <span className="text-[11px] text-gray-400 mt-1 block">
+                    Used to display secondary international pricing for foreign guests.
+                  </span>
+                </div>
 
-              <div>
-                <label className="block font-semibold mb-1">Guest Data Retention (Days - Kenya Data Protection Act 2019)</label>
-                <input
-                  type="number"
-                  value={settings.retention_days}
-                  onChange={(e) => setSettings({ ...settings, retention_days: Number(e.target.value) })}
-                  className="w-full px-3 py-2 rounded-xl bg-stone-50 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-sm focus:outline-none focus:border-crown-gold"
-                />
-              </div>
+                <div>
+                  <label className="block font-semibold mb-1 text-crown-navy dark:text-crown-ivory">
+                    Service Charge Percentage (%)
+                  </label>
+                  <input
+                    type="number"
+                    value={backendStore.getProperty().service_charge_pct}
+                    readOnly
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-100 dark:bg-stone-900 border border-stone-200 dark:border-stone-800 text-sm opacity-70 font-semibold"
+                  />
+                  <span className="text-[11px] text-gray-400 mt-1 block">
+                    Standard 5.0% hospitality service charge configured for Crown Plaza Nairobi.
+                  </span>
+                </div>
 
-              <div className="pt-2">
-                <button
-                  onClick={() => {
-                    backendStore.updateSettings(settings);
-                    notify('Settings saved and synchronized.');
-                  }}
-                  className="px-6 py-2.5 rounded-xl bg-crown-navy dark:bg-crown-gold text-crown-ivory dark:text-crown-navy font-bold hover:opacity-90 transition shadow-sm"
-                >
-                  Save Settings
-                </button>
+                <div>
+                  <label className="block font-semibold mb-1 text-crown-navy dark:text-crown-ivory">
+                    Guest Data Retention (Days - Kenya Data Protection Act 2019)
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.retention_days}
+                    onChange={(e) => setSettings({ ...settings, retention_days: Number(e.target.value) })}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-stone-50 dark:bg-[#071527] border border-stone-200 dark:border-stone-800 text-sm font-semibold focus:outline-none focus:border-crown-gold"
+                  />
+                  <span className="text-[11px] text-gray-400 mt-1 block">
+                    Complies with KDPA statutory audit and guest consent anonymization guidelines.
+                  </span>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    onClick={() => {
+                      backendStore.updateSettings(settings);
+                      notify('Hotel settings saved and synchronized across all active displays.');
+                    }}
+                    className="px-6 py-2.5 rounded-xl bg-crown-navy dark:bg-crown-gold text-crown-ivory dark:text-crown-navy font-bold hover:opacity-90 transition shadow-md flex items-center gap-2"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>Save Hotel Settings</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

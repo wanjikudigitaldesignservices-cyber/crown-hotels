@@ -899,8 +899,136 @@ class LocalBackendStore {
 // Single instance backend store
 export const backendStore = new LocalBackendStore();
 
-// Supabase client instance (connects to Supabase project if env provided, or local dev client)
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://mock-crown-hotels.supabase.co';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'mock-anon-key-crown-hotels-2026';
+// -----------------------------------------------------------------------------
+// SUPABASE CLIENT & LIVE DATABASE CONNECTION MANAGER
+// -----------------------------------------------------------------------------
+export function getSavedSupabaseConfig(): { url: string; key: string } {
+  if (typeof window === 'undefined') {
+    return {
+      url: import.meta.env.VITE_SUPABASE_URL || '',
+      key: import.meta.env.VITE_SUPABASE_ANON_KEY || '',
+    };
+  }
+  const url = localStorage.getItem('crown_hotels_supabase_url') || import.meta.env.VITE_SUPABASE_URL || '';
+  const key = localStorage.getItem('crown_hotels_supabase_key') || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+  return { url, key };
+}
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export function isSupabaseLiveConfigured(): boolean {
+  const { url, key } = getSavedSupabaseConfig();
+  return (
+    Boolean(url) &&
+    !url.includes('mock-crown-hotels') &&
+    !url.includes('your-project') &&
+    Boolean(key) &&
+    key.length > 25
+  );
+}
+
+export function createSupabaseClient(customUrl?: string, customKey?: string) {
+  const { url, key } = getSavedSupabaseConfig();
+  const targetUrl = customUrl || url || 'https://mock-crown-hotels.supabase.co';
+  const targetKey = customKey || key || 'mock-anon-key-crown-hotels-2026';
+  return createClient(targetUrl, targetKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+    realtime: {
+      params: { eventsPerSecond: 10 },
+    },
+  });
+}
+
+export let supabase = createSupabaseClient();
+
+export async function verifySupabaseConnection(url: string, key: string): Promise<{ success: boolean; message: string }> {
+  try {
+    const cleanUrl = url.trim().replace(/\/$/, '');
+    const cleanKey = key.trim();
+
+    if (!cleanUrl.startsWith('https://') || !cleanUrl.includes('.supabase.co')) {
+      return { success: false, message: 'Invalid Supabase URL. Format: https://<project-ref>.supabase.co' };
+    }
+    if (!cleanKey || cleanKey.length < 25) {
+      return { success: false, message: 'Invalid Supabase Anon Key. Expected JWT string starting with eyJhbGciOi...' };
+    }
+
+    const response = await fetch(`${cleanUrl}/rest/v1/`, {
+      method: 'GET',
+      headers: {
+        apikey: cleanKey,
+        Authorization: `Bearer ${cleanKey}`,
+      },
+    });
+
+    if (response.ok || response.status === 200) {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('crown_hotels_supabase_url', cleanUrl);
+        localStorage.setItem('crown_hotels_supabase_key', cleanKey);
+        supabase = createSupabaseClient(cleanUrl, cleanKey);
+      }
+      return {
+        success: true,
+        message: 'Connected to Supabase live project successfully! Realtime subscriptions & PostgreSQL tables are active.',
+      };
+    } else {
+      const errText = await response.text();
+      return {
+        success: false,
+        message: `Supabase returned HTTP ${response.status}: ${errText || 'Project may be paused or credentials invalid.'}`,
+      };
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Failed to connect to Supabase: ${err.message}. If the project is paused, please unpause/restore it in the Supabase Dashboard.`,
+    };
+  }
+}
+
+export function clearSavedSupabaseConfig(): void {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('crown_hotels_supabase_url');
+    localStorage.removeItem('crown_hotels_supabase_key');
+    supabase = createSupabaseClient();
+  }
+}
+
+export async function testSupabaseDatabaseQuery(): Promise<{ 
+  success: boolean; 
+  message: string; 
+  tableCounts?: { categories: number; items: number; servicePoints: number } 
+}> {
+  try {
+    const [catRes, itemRes, spRes] = await Promise.all([
+      supabase.from('menu_categories').select('id'),
+      supabase.from('menu_items').select('id'),
+      supabase.from('service_points').select('id')
+    ]);
+
+    if (catRes.error || itemRes.error || spRes.error) {
+      const err = catRes.error || itemRes.error || spRes.error;
+      return {
+        success: false,
+        message: `Supabase reached, but table query reported: ${err?.message || 'Schema table missing'}. Ensure migration scripts from supabase/migrations have been executed.`,
+      };
+    }
+
+    const catCount = catRes.data?.length ?? 0;
+    const itemCount = itemRes.data?.length ?? 0;
+    const spCount = spRes.data?.length ?? 0;
+
+    return {
+      success: true,
+      message: `PostgreSQL tables queried successfully: ${catCount} categories, ${itemCount} menu items, ${spCount} service points detected.`,
+      tableCounts: { categories: catCount, items: itemCount, servicePoints: spCount }
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Query verification failed: ${err.message}`,
+    };
+  }
+}
+
